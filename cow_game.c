@@ -11,6 +11,7 @@
 #define MAX_COWS 5
 #define MAX_GRASS 25
 #define MAX_LEADERBOARD 5
+#define MAX_LIVES 3
 
 // Game entities
 typedef struct {
@@ -35,8 +36,10 @@ Cow ai_cows[MAX_COWS];
 Grass grass[MAX_GRASS];
 LeaderboardEntry leaderboard[MAX_LEADERBOARD];
 int score = 0;
+int lives = MAX_LIVES;
 int game_over = 0;
 int grass_count = MAX_GRASS;
+int invincible_timer = 0; // Brief invincibility after getting hit
 
 // Function prototypes
 void initialize_game();
@@ -48,75 +51,217 @@ void spawn_grass();
 void clear_screen();
 int kbhit_custom();
 char getch_custom();
+void clear_input_buffer();
 void load_leaderboard();
 void save_leaderboard();
 void update_leaderboard(int new_score);
 void display_leaderboard();
 void draw_cow_face();
+void show_game_over_screen();
 
-int main() {
-    srand(time(NULL));
-    load_leaderboard();
-    initialize_game();
+// Utility functions first
+void clear_screen() {
+    system("clear"); // Linux/Mac
+}
+
+int kbhit_custom() {
+    struct termios oldt, newt;
+    int ch;
+    int oldf;
     
-    printf("=== ASCII COW PASTURE GAME ===\n\n");
-    draw_cow_face();
-    printf("\n");
-    printf("Your black & white cow starts in the lower left corner!\n");
-    printf("Move with arrow keys or WASD:\n");
-    printf("  ^__^\n");
-    printf(" (@O)\\_\n");
-    printf("  ||--w|\n");
-    printf("Press SPACE to eat grass (vvv)\n");
-    printf("Avoid the all-black cows - fast-paced action!\n");
-    printf("Press ESC or Q to quit\n\n");
+    tcgetattr(STDIN_FILENO, &oldt);
+    newt = oldt;
+    newt.c_lflag &= ~(ICANON | ECHO);
+    tcsetattr(STDIN_FILENO, TCSANOW, &newt);
+    oldf = fcntl(STDIN_FILENO, F_GETFL, 0);
+    fcntl(STDIN_FILENO, F_SETFL, oldf | O_NONBLOCK);
     
-    display_leaderboard();
-    printf("\nPress any key to start...\n");
-    getch_custom();
-    getch_custom();
+    ch = getchar();
     
-    while (!game_over) {
-        clear_screen();
-        draw_field();
-        printf("Score: %d | Grass eaten: %d\n", score, MAX_GRASS - grass_count);
-        
-        if (kbhit_custom()) {
-            handle_input();
-        }
-        
-        update_ai_cows();
-        check_collisions();
-        spawn_grass();
-        
-        usleep(80000); // Game speed (80ms - much faster)
+    tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
+    fcntl(STDIN_FILENO, F_SETFL, oldf);
+    
+    if(ch != EOF) {
+        ungetc(ch, stdin);
+        return 1;
     }
     
-    clear_screen();
-    printf("\n");
-    draw_cow_face();
-    printf("\n");
-    printf("GAME OVER!\n");
-    printf("Final Score: %d\n", score);
-    printf("Grass eaten: %d\n", MAX_GRASS - grass_count);
-    
-    // Update leaderboard
-    update_leaderboard(score);
-    printf("\n");
-    display_leaderboard();
-    printf("\n");
-    draw_cow_face();
-    printf("\n");
-    printf("Press any key to exit...\n");
-    getch_custom();
-    
     return 0;
+}
+
+char getch_custom() {
+    struct termios oldt, newt;
+    char ch;
+    
+    tcgetattr(STDIN_FILENO, &oldt);
+    newt = oldt;
+    newt.c_lflag &= ~(ICANON | ECHO);
+    tcsetattr(STDIN_FILENO, TCSANOW, &newt);
+    
+    ch = getchar();
+    
+    tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
+    
+    return ch;
+}
+
+void clear_input_buffer() {
+    // Clear any pending input to prevent it from interfering with subsequent reads
+    while (kbhit_custom()) {
+        getch_custom();
+    }
+    // Additional buffer clearing
+    fflush(stdin);
+}
+
+void draw_cow_face() {
+    printf("        /\\_/\\  /\\_/\\\n");
+    printf("       (           )\n");
+    printf("        \\ XX   XX /\n");
+    printf("         |        |\n");
+    printf("         |        |\n");
+    printf("         | ( 0   0 ) |\n");
+    printf("          \\      /\n");
+    printf("           \\____/\n");
+}
+
+void load_leaderboard() {
+    FILE *file = fopen("cow_scores.txt", "r");
+    if (file == NULL) {
+        // Initialize empty leaderboard
+        for (int i = 0; i < MAX_LEADERBOARD; i++) {
+            leaderboard[i].score = 0;
+            strcpy(leaderboard[i].name, "Anonymous");
+        }
+        return;
+    }
+    
+    for (int i = 0; i < MAX_LEADERBOARD; i++) {
+        if (fscanf(file, "%d %s", &leaderboard[i].score, leaderboard[i].name) != 2) {
+            leaderboard[i].score = 0;
+            strcpy(leaderboard[i].name, "Anonymous");
+        }
+    }
+    fclose(file);
+}
+
+void save_leaderboard() {
+    FILE *file = fopen("cow_scores.txt", "w");
+    if (file == NULL) return;
+    
+    for (int i = 0; i < MAX_LEADERBOARD; i++) {
+        fprintf(file, "%d %s\n", leaderboard[i].score, leaderboard[i].name);
+    }
+    fclose(file);
+}
+
+void display_leaderboard() {
+    printf("🏆 LEADERBOARD 🏆\n");
+    printf("================\n");
+    for (int i = 0; i < MAX_LEADERBOARD; i++) {
+        if (leaderboard[i].score > 0) {
+            printf("%d. %-15s %d pts\n", i+1, leaderboard[i].name, leaderboard[i].score);
+        } else {
+            printf("%d. %-15s ---\n", i+1, "Empty");
+        }
+    }
+}
+
+void update_leaderboard(int new_score) {
+    // Check if score qualifies for leaderboard
+    if (new_score <= leaderboard[MAX_LEADERBOARD-1].score) {
+        return; // Score too low
+    }
+    
+    printf("\n🎉 NEW HIGH SCORE! 🎉\n");
+    printf("You made it to the leaderboard!\n\n");
+    
+    // Extra input clearing and pause before name entry
+    clear_input_buffer();
+    usleep(500000); // 0.5 second pause
+    clear_input_buffer();
+    
+    printf("Enter your name (max 19 chars): ");
+    fflush(stdout); // Make sure prompt is displayed
+    
+    // Clear input buffer one more time before reading name
+    clear_input_buffer();
+    
+    char name[20];
+    // Use a more controlled input method
+    if (fgets(name, sizeof(name), stdin) != NULL) {
+        // Remove newline if present
+        size_t len = strlen(name);
+        if (len > 0 && name[len-1] == '\n') {
+            name[len-1] = '\0';
+        }
+        if (strlen(name) == 0) {
+            strcpy(name, "Anonymous");
+        }
+    } else {
+        strcpy(name, "Anonymous");
+    }
+    
+    // Insert new score in correct position
+    int insert_pos = MAX_LEADERBOARD;
+    for (int i = 0; i < MAX_LEADERBOARD; i++) {
+        if (new_score > leaderboard[i].score) {
+            insert_pos = i;
+            break;
+        }
+    }
+    
+    // Shift scores down
+    for (int i = MAX_LEADERBOARD-1; i > insert_pos; i--) {
+        leaderboard[i] = leaderboard[i-1];
+    }
+    
+    // Insert new score
+    if (insert_pos < MAX_LEADERBOARD) {
+        leaderboard[insert_pos].score = new_score;
+        strcpy(leaderboard[insert_pos].name, name);
+    }
+    
+    save_leaderboard();
+    
+    printf("\nCongratulations! Your score has been saved!\n");
+    usleep(1000000); // 1 second pause to let them see the message
+}
+
+void show_game_over_screen() {
+    clear_screen();
+    printf("\n\n\n");
+    
+    // Large "GAME OVER" text
+    printf("     ██████   █████  ███    ███ ███████      ██████  ██    ██ ███████ ██████  \n");
+    printf("    ██       ██   ██ ████  ████ ██          ██    ██ ██    ██ ██      ██   ██ \n");
+    printf("    ██   ███ ███████ ██ ████ ██ █████       ██    ██ ██    ██ █████   ██████  \n");
+    printf("    ██    ██ ██   ██ ██  ██  ██ ██          ██    ██  ██  ██  ██      ██   ██ \n");
+    printf("     ██████  ██   ██ ██      ██ ███████      ██████    ████   ███████ ██   ██ \n");
+    
+    printf("\n\n");
+    
+    // Show the cow face
+    draw_cow_face();
+    
+    printf("\n");
+    printf("                        You ran out of lives!\n");
+    printf("                     The black cows got you...\n");
+    printf("\n");
+    printf("                    Press any key to continue...\n");
+    
+    // Wait for any key press
+    getch_custom();
 }
 
 void initialize_game() {
     // Initialize player in lower left corner (7-char wide, 3 lines tall)
     player.x = 3; // Near left edge but away from fence
     player.y = HEIGHT - 6; // Near bottom but away from fence and accounting for cow height
+    
+    // Reset lives
+    lives = MAX_LIVES;
+    invincible_timer = 0;
     
     // Initialize AI cows
     for (int i = 0; i < MAX_COWS; i++) {
@@ -195,8 +340,9 @@ void draw_field() {
         }
     }
     
-    // Draw player cow (black and white ASCII art cow)
-    if (player.x > 0 && player.x < WIDTH-7 && player.y > 0 && player.y < HEIGHT-4) {
+    // Draw player cow (black and white ASCII art cow) - blink if invincible
+    if (player.x > 0 && player.x < WIDTH-7 && player.y > 0 && player.y < HEIGHT-4 && 
+        (invincible_timer == 0 || invincible_timer % 8 < 4)) { // Blink effect during invincibility
         // Line 1: head
         field[player.y][player.x] = ' ';
         field[player.y][player.x+1] = '^';
@@ -231,27 +377,27 @@ void draw_field() {
 }
 
 void update_ai_cows() {
-    // Slow down AI cows - they only move every 2nd update (faster than before)
+    // Slow down AI cows - they only move every 4th update (much slower)
     static int move_counter = 0;
     move_counter++;
-    if (move_counter < 2) return;
+    if (move_counter < 4) return;  // Changed from 2 to 4 for slower movement
     move_counter = 0;
     
     for (int i = 0; i < MAX_COWS; i++) {
         // Random direction change occasionally (less frequent)
-        if (rand() % 15 == 0) {
+        if (rand() % 20 == 0) {  // Changed from 15 to 20 for less frequent direction changes
             ai_cows[i].dx = (rand() % 3) - 1;
             ai_cows[i].dy = (rand() % 3) - 1;
         }
         
         // Calculate new position
-        int new_x = ai_cows[i].x + (ai_cows[i].dx * 3); // Move by 3 for 7-char width
+        int new_x = ai_cows[i].x + (ai_cows[i].dx * 2); // Move by 2 instead of 3 for slower movement
         int new_y = ai_cows[i].y + ai_cows[i].dy;
         
         // Check boundaries and reverse direction if hitting fence
         if (new_x <= 0 || new_x >= WIDTH-8) { // Account for 7-char width
             ai_cows[i].dx = -ai_cows[i].dx;
-            new_x = ai_cows[i].x + (ai_cows[i].dx * 3);
+            new_x = ai_cows[i].x + (ai_cows[i].dx * 2);
         }
         if (new_y <= 0 || new_y >= HEIGHT-4) { // Account for 3-line height
             ai_cows[i].dy = -ai_cows[i].dy;
@@ -343,12 +489,23 @@ void handle_input() {
 }
 
 void check_collisions() {
+    // Skip collision detection if invincible
+    if (invincible_timer > 0) {
+        return;
+    }
+    
     // Check collision with AI cows (both are 7-char wide, 3-lines tall)
     for (int i = 0; i < MAX_COWS; i++) {
         // Check if the cow sprites overlap
         if (abs(player.y - ai_cows[i].y) <= 2 && // Vertical overlap (3 lines tall)
             abs(player.x - ai_cows[i].x) <= 6) { // Horizontal overlap (7 chars wide)
-            game_over = 1;
+            
+            lives--; // Lose a life
+            invincible_timer = 60; // 60 frames of invincibility (about 5 seconds at 80ms per frame)
+            
+            if (lives <= 0) {
+                game_over = 1;
+            }
             return;
         }
     }
@@ -381,147 +538,77 @@ void spawn_grass() {
     }
 }
 
-void clear_screen() {
-    system("clear"); // Linux/Mac
-}
-
-int kbhit_custom() {
-    struct termios oldt, newt;
-    int ch;
-    int oldf;
+int main() {
+    srand(time(NULL));
+    load_leaderboard();
+    initialize_game();
     
-    tcgetattr(STDIN_FILENO, &oldt);
-    newt = oldt;
-    newt.c_lflag &= ~(ICANON | ECHO);
-    tcsetattr(STDIN_FILENO, TCSANOW, &newt);
-    oldf = fcntl(STDIN_FILENO, F_GETFL, 0);
-    fcntl(STDIN_FILENO, F_SETFL, oldf | O_NONBLOCK);
+    printf("=== ASCII COW PASTURE GAME ===\n\n");
+    draw_cow_face();
+    printf("\n");
+    printf("Your black & white cow starts in the lower left corner!\n");
+    printf("Move with arrow keys or WASD:\n");
+    printf("  ^__^\n");
+    printf(" (@O)\\_\n");
+    printf("  ||--w|\n");
+    printf("Press SPACE to eat grass (vvv)\n");
+    printf("Avoid the all-black cows - you have 3 lives!\n");
+    printf("Press ESC or Q to quit\n\n");
     
-    ch = getchar();
+    display_leaderboard();
+    printf("\nPress any key to start...\n");
+    getch_custom();
+    getch_custom();
     
-    tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
-    fcntl(STDIN_FILENO, F_SETFL, oldf);
-    
-    if(ch != EOF) {
-        ungetc(ch, stdin);
-        return 1;
+    while (!game_over) {
+        clear_screen();
+        draw_field();
+        printf("Score: %d | Grass eaten: %d | Lives: %d\n", score, MAX_GRASS - grass_count, lives);
+        
+        if (kbhit_custom()) {
+            handle_input();
+        }
+        
+        update_ai_cows();
+        check_collisions();
+        spawn_grass();
+        
+        // Decrease invincibility timer
+        if (invincible_timer > 0) {
+            invincible_timer--;
+        }
+        
+        usleep(80000); // Game speed (80ms)
     }
+    
+    // Clear any remaining input before game over screen
+    clear_input_buffer();
+    
+    // Show game over screen
+    show_game_over_screen();
+    
+    // Clear input again before leaderboard
+    clear_input_buffer();
+    
+    // Show leaderboard and handle high score entry
+    clear_screen();
+    printf("\n");
+    draw_cow_face();
+    printf("\n");
+    printf("FINAL RESULTS\n");
+    printf("=============\n");
+    printf("Score: %d\n", score);
+    printf("Grass eaten: %d\n", MAX_GRASS - grass_count);
+    
+    // Update leaderboard
+    update_leaderboard(score);
+    printf("\n");
+    display_leaderboard();
+    printf("\n");
+    draw_cow_face();
+    printf("\n");
+    printf("Press any key to exit...\n");
+    getch_custom();
     
     return 0;
-}
-
-char getch_custom() {
-    struct termios oldt, newt;
-    char ch;
-    
-    tcgetattr(STDIN_FILENO, &oldt);
-    newt = oldt;
-    newt.c_lflag &= ~(ICANON | ECHO);
-    tcsetattr(STDIN_FILENO, TCSANOW, &newt);
-    
-    ch = getchar();
-    
-    tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
-    
-    return ch;
-}
-
-void draw_cow_face() {
-    printf("        /\\_/\\  /\\_/\\\n");
-    printf("       (           )\n");
-    printf("        \\ XX   XX /\n");
-    printf("         |        |\n");
-    printf("         |        |\n");
-    printf("         | ( 0   0 ) |\n");
-    printf("          \\      /\n");
-    printf("           \\____/\n");
-}
-
-void load_leaderboard() {
-    FILE *file = fopen("cow_scores.txt", "r");
-    if (file == NULL) {
-        // Initialize empty leaderboard
-        for (int i = 0; i < MAX_LEADERBOARD; i++) {
-            leaderboard[i].score = 0;
-            strcpy(leaderboard[i].name, "Anonymous");
-        }
-        return;
-    }
-    
-    for (int i = 0; i < MAX_LEADERBOARD; i++) {
-        if (fscanf(file, "%d %s", &leaderboard[i].score, leaderboard[i].name) != 2) {
-            leaderboard[i].score = 0;
-            strcpy(leaderboard[i].name, "Anonymous");
-        }
-    }
-    fclose(file);
-}
-
-void save_leaderboard() {
-    FILE *file = fopen("cow_scores.txt", "w");
-    if (file == NULL) return;
-    
-    for (int i = 0; i < MAX_LEADERBOARD; i++) {
-        fprintf(file, "%d %s\n", leaderboard[i].score, leaderboard[i].name);
-    }
-    fclose(file);
-}
-
-void update_leaderboard(int new_score) {
-    // Check if score qualifies for leaderboard
-    if (new_score <= leaderboard[MAX_LEADERBOARD-1].score) {
-        return; // Score too low
-    }
-    
-    printf("\n🎉 NEW HIGH SCORE! 🎉\n");
-    printf("Enter your name (max 19 chars): ");
-    
-    char name[20];
-    // Simple input reading
-    if (fgets(name, sizeof(name), stdin) != NULL) {
-        // Remove newline if present
-        size_t len = strlen(name);
-        if (len > 0 && name[len-1] == '\n') {
-            name[len-1] = '\0';
-        }
-        if (strlen(name) == 0) {
-            strcpy(name, "Anonymous");
-        }
-    } else {
-        strcpy(name, "Anonymous");
-    }
-    
-    // Insert new score in correct position
-    int insert_pos = MAX_LEADERBOARD;
-    for (int i = 0; i < MAX_LEADERBOARD; i++) {
-        if (new_score > leaderboard[i].score) {
-            insert_pos = i;
-            break;
-        }
-    }
-    
-    // Shift scores down
-    for (int i = MAX_LEADERBOARD-1; i > insert_pos; i--) {
-        leaderboard[i] = leaderboard[i-1];
-    }
-    
-    // Insert new score
-    if (insert_pos < MAX_LEADERBOARD) {
-        leaderboard[insert_pos].score = new_score;
-        strcpy(leaderboard[insert_pos].name, name);
-    }
-    
-    save_leaderboard();
-}
-
-void display_leaderboard() {
-    printf("🏆 LEADERBOARD 🏆\n");
-    printf("================\n");
-    for (int i = 0; i < MAX_LEADERBOARD; i++) {
-        if (leaderboard[i].score > 0) {
-            printf("%d. %-15s %d pts\n", i+1, leaderboard[i].name, leaderboard[i].score);
-        } else {
-            printf("%d. %-15s ---\n", i+1, "Empty");
-        }
-    }
 }
